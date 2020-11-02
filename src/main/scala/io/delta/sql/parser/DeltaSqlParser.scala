@@ -21,7 +21,7 @@
  */
 
 /*
- * Copyright 2019 Databricks, Inc.
+ * Copyright (2020) The Delta Lake Project Authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -42,8 +42,9 @@ import java.util.Locale
 
 import scala.collection.JavaConverters._
 
+import org.apache.spark.sql.delta.commands._
 import io.delta.sql.parser.DeltaSqlBaseParser._
-import io.delta.tables.execution.{DescribeDeltaHistoryCommand, VacuumTableCommand}
+import io.delta.tables.execution.VacuumTableCommand
 import org.antlr.v4.runtime._
 import org.antlr.v4.runtime.atn.PredictionMode
 import org.antlr.v4.runtime.misc.{Interval, ParseCancellationException}
@@ -54,10 +55,8 @@ import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.{FunctionIdentifier, TableIdentifier}
 import org.apache.spark.sql.catalyst.parser.{ParseErrorListener, ParseException, ParserInterface}
 import org.apache.spark.sql.catalyst.parser.ParserUtils.{string, withOrigin}
-import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
+import org.apache.spark.sql.catalyst.plans.logical.{AlterTableAddConstraintStatement, AlterTableDropConstraintStatement, LogicalPlan}
 import org.apache.spark.sql.catalyst.trees.Origin
-import org.apache.spark.sql.delta.commands.DescribeDeltaDetailCommandOSS
-import org.apache.spark.sql.delta.commands.ConvertToDeltaCommand
 import org.apache.spark.sql.types._
 
 /**
@@ -127,9 +126,14 @@ class DeltaSqlParser(val delegate: ParserInterface) extends ParserInterface {
   override def parseFunctionIdentifier(sqlText: String): FunctionIdentifier =
     delegate.parseFunctionIdentifier(sqlText)
 
+  override def parseMultipartIdentifier (sqlText: String): Seq[String] =
+    delegate.parseMultipartIdentifier(sqlText)
+
   override def parseTableSchema(sqlText: String): StructType = delegate.parseTableSchema(sqlText)
 
   override def parseDataType(sqlText: String): DataType = delegate.parseDataType(sqlText)
+
+  override def parseRawDataType(sqlText: String): DataType = delegate.parseRawDataType(sqlText)
 }
 
 /**
@@ -155,7 +159,7 @@ class DeltaSqlAstBuilder extends DeltaSqlBaseBaseVisitor[AnyRef] {
 
   override def visitDescribeDeltaDetail(
       ctx: DescribeDeltaDetailContext): LogicalPlan = withOrigin(ctx) {
-    DescribeDeltaDetailCommandOSS(
+    DescribeDeltaDetailCommand(
       Option(ctx.path).map(string),
       Option(ctx.table).map(visitTableIdentifier))
   }
@@ -166,6 +170,12 @@ class DeltaSqlAstBuilder extends DeltaSqlBaseBaseVisitor[AnyRef] {
       Option(ctx.path).map(string),
       Option(ctx.table).map(visitTableIdentifier),
       Option(ctx.limit).map(_.getText.toInt))
+  }
+
+  override def visitGenerate(ctx: GenerateContext): LogicalPlan = withOrigin(ctx) {
+    DeltaGenerateCommand(
+      modeName = ctx.modeName.getText,
+      tableId = visitTableIdentifier(ctx.table))
   }
 
   override def visitConvert(ctx: ConvertContext): LogicalPlan = withOrigin(ctx) {
@@ -210,6 +220,32 @@ class DeltaSqlAstBuilder extends DeltaSqlBaseBaseVisitor[AnyRef] {
       cleanedDataType,
       nullable = NOT == null,
       builder.build())
+  }
+
+  // Build the text of the CHECK constraint expression. The user-specified whitespace is in the
+  // HIDDEN channel where we can't get to it, so we just paste together all the tokens with a single
+  // space. This produces some strange spacing (e.g. `structCol . arr [ 0 ]`), but right now we
+  // think that's preferable to the additional complexity involved in trying to produce cleaner
+  // output.
+  private def buildCheckConstraintText(tokens: Seq[CheckExprTokenContext]): String = {
+    tokens.map(_.getText).mkString(" ")
+  }
+
+  override def visitAddTableConstraint(
+      ctx: AddTableConstraintContext): LogicalPlan = withOrigin(ctx) {
+    val checkConstraint = ctx.constraint().asInstanceOf[CheckConstraintContext]
+
+    AlterTableAddConstraintStatement(
+      ctx.table.identifier.asScala.map(_.getText),
+      ctx.name.getText,
+      buildCheckConstraintText(checkConstraint.checkExprToken().asScala))
+  }
+
+  override def visitDropTableConstraint(
+      ctx: DropTableConstraintContext): LogicalPlan = withOrigin(ctx) {
+    AlterTableDropConstraintStatement(
+      ctx.table.identifier.asScala.map(_.getText),
+      ctx.name.getText)
   }
 
   protected def typedVisit[T](ctx: ParseTree): T = {

@@ -1,5 +1,5 @@
 /*
- * Copyright 2019 Databricks, Inc.
+ * Copyright (2020) The Delta Lake Project Authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,8 +19,10 @@ package org.apache.spark.sql.delta
 import org.apache.spark.sql.delta.sources.DeltaSourceUtils
 import org.apache.hadoop.fs.Path
 
-import org.apache.spark.sql.SparkSession
+import org.apache.spark.internal.Logging
+import org.apache.spark.sql.{AnalysisException, SparkSession}
 import org.apache.spark.sql.catalyst.TableIdentifier
+import org.apache.spark.sql.internal.SQLConf
 
 /**
  * An identifier for a Delta table containing one of the path or the table identifier.
@@ -51,7 +53,7 @@ case class DeltaTableIdentifier(
 
   def quotedString: String = {
     val replacedId = quoteIdentifier(identifier)
-    val replacedDb = database.map(quoteIdentifier(_))
+    val replacedDb = database.map(quoteIdentifier)
 
     if (replacedDb.isDefined) s"`${replacedDb.get}`.`$replacedId`" else s"`$replacedId`"
   }
@@ -65,8 +67,10 @@ case class DeltaTableIdentifier(
 
 /**
  * Utilities for DeltaTableIdentifier.
+ * TODO(burak): Get rid of these utilities. DeltaCatalog should be the skinny-waist for figuring
+ * these things out.
  */
-object DeltaTableIdentifier {
+object DeltaTableIdentifier extends Logging {
 
   /**
    * Check the specified table identifier represents a Delta path.
@@ -74,12 +78,22 @@ object DeltaTableIdentifier {
   def isDeltaPath(spark: SparkSession, identifier: TableIdentifier): Boolean = {
     val catalog = spark.sessionState.catalog
     def tableIsTemporaryTable = catalog.isTemporaryTable(identifier)
-    def databaseExists = catalog.databaseExists(identifier.database.get)
-    def tableExists = catalog.tableExists(identifier)
+    def tableExists: Boolean = {
+      try {
+        catalog.databaseExists(identifier.database.get) && catalog.tableExists(identifier)
+      } catch {
+        case e: AnalysisException if gluePermissionError(e) =>
+          logWarning("Received an access denied error from Glue. Will check to see if this " +
+            s"identifier ($identifier) is path based.", e)
+          false
+      }
+    }
 
-    DeltaSourceUtils.isDeltaTable(identifier.database) &&
+    spark.sessionState.conf.runSQLonFile &&
+      DeltaSourceUtils.isDeltaTable(identifier.database) &&
       !tableIsTemporaryTable &&
-      (!databaseExists || !tableExists)
+      !tableExists &&
+      new Path(identifier.table).isAbsolute
   }
 
   /**
@@ -94,5 +108,18 @@ object DeltaTableIdentifier {
     } else {
       None
     }
+  }
+
+  /**
+   * When users try to access Delta tables by path, e.g. delta.`/some/path`, we need to first check
+   * if such a table exists in the MetaStore (due to Spark semantics :/). The Glue MetaStore may
+   * return Access Denied errors during this check. This method matches on this failure mode.
+   */
+  def gluePermissionError(e: AnalysisException): Boolean = e.getCause match {
+    case h: Exception if h.getClass.getName == "org.apache.hadoop.hive.ql.metadata.HiveException" =>
+      Seq("AWSGlue", "AccessDeniedException").forall { kw =>
+        h.getMessage.contains(kw)
+      }
+    case _ => false
   }
 }

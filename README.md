@@ -12,13 +12,13 @@ See the [Quick Start Guide](https://docs.delta.io/latest/quick-start.html) to ge
 
 ### Maven
 
-You include Delta Lake in your Maven project by adding it as a dependency in your POM file. Delta Lake is cross compiled with Scala versions 2.11 and 2.12; choose the version that matches your project. If you are writing a Java project, you can use either version.
+Starting from 0.7.0, Delta Lake is only available with Scala version 2.12.
 
 ```xml
 <dependency>
   <groupId>io.delta</groupId>
-  <artifactId>delta-core_2.11</artifactId>
-  <version>0.4.0</version>
+  <artifactId>delta-core_2.12</artifactId>
+  <version>0.7.0</version>
 </dependency>
 ```
 
@@ -27,7 +27,7 @@ You include Delta Lake in your Maven project by adding it as a dependency in you
 You include Delta Lake in your SBT project by adding the following line to your build.sbt file:
 
 ```scala
-libraryDependencies += "io.delta" %% "delta-core" % "0.4.0"
+libraryDependencies += "io.delta" %% "delta-core" % "0.7.0"
 ```
 
 ## API Documentation
@@ -40,13 +40,13 @@ libraryDependencies += "io.delta" %% "delta-core" % "0.4.0"
 
 ### Compatibility with Apache Spark Versions
 
-Delta Lake currently requires Apache Spark 2.4.2. Earlier versions are missing [SPARK-27453](https://issues.apache.org/jira/browse/SPARK-27453), which breaks the `partitionBy` clause of the `DataFrameWriter`.
+Delta Lake currently requires Apache Spark 3.0.0
 
 ### API Compatibility
 
-The only stable, public APIs currently provided by Delta Lake are through the `DataFrameReader`/`Writer` (i.e. `spark.read`, `df.write`, `spark.readStream` and `df.writeStream`). Options to these APIs will remain stable within a major release of Delta Lake (e.g., 1.x.x).
+The only stable public APIs, currently provided by Delta Lake, are through the `DataFrameReader`/`Writer` (i.e. `spark.read`, `df.write`, `spark.readStream` and `df.writeStream`). Options to these APIs will remain stable within a major release of Delta Lake (e.g., 1.x.x).
 
-All other interfaces in the this library are considered internal, and they are subject to change across minor / patch releases.
+All other interfaces in this library are considered internal, and they are subject to change across minor/patch releases.
 
 ### Data Storage Compatibility
 
@@ -56,11 +56,11 @@ Breaking changes in the protocol are indicated by incrementing the minimum reade
 
 ## Roadmap
 
-Delta Lake is a recent open source project based on technology developed at Databricks. We plan to open-source all APIs that are required to correctly run Spark programs that read and write Delta tables. For a detailed timeline on this effort see the [project roadmap](https://github.com/delta-io/delta/milestones).
+Delta Lake is a recent open-source project based on technology developed at Databricks. We plan to open-source all APIs that are required to correctly run Spark programs that read and write Delta tables. For a detailed timeline on this effort see the [project roadmap](https://github.com/delta-io/delta/milestones).
 
 # Building
 
-Delta Lake Core is compiled using [SBT](https://www.scala-sbt.org/1.x/docs/Command-Line-Reference.html). 
+Delta Lake Core is compiled using [SBT](https://www.scala-sbt.org/1.x/docs/Command-Line-Reference.html).
 
 To compile, run
 
@@ -71,7 +71,7 @@ To generate artifacts, run
     build/sbt package
 
 To execute tests, run
-  
+
     build/sbt test
 
 Refer to [SBT docs](https://www.scala-sbt.org/1.x/docs/Command-Line-Reference.html) for more commands.
@@ -82,9 +82,9 @@ Refer to [SBT docs](https://www.scala-sbt.org/1.x/docs/Command-Line-Reference.ht
 
 ## Requirements for Underlying Storage Systems
 
-Delta Lake ACID guarantees are predicated on the atomicity and durability guarantees of the storage system. Specifically, we require the storage system to provide the following. 
+Delta Lake ACID guarantees are predicated on the atomicity and durability guarantees of the storage system. Specifically, we require the storage system to provide the following.
 
-1. **Atomic visibility**: There must be a way for a file to be visible in its entirety or not visible at all. 
+1. **Atomic visibility**: There must be a way for a file to be visible in its entirety or not visible at all.
 2. **Mutual exclusion**: Only one writer must be able to create (or rename) a file at the final destination.
 3. **Consistent listing**: Once a file has been written in a directory, all future listings for that directory must return that file.
 
@@ -101,15 +101,17 @@ Delta Lake ensures _serializability_ for concurrent reads and writes. Please see
 We use [GitHub Issues](https://github.com/delta-io/delta/issues) to track community reported issues. You can also [contact](#community) the community for getting answers.
 
 # Contributing 
+We welcome contributions to Delta Lake. See our [CONTRIBUTING.md](https://github.com/delta-io/delta/blob/master/CONTRIBUTING.md) for more details.
 
-We welcome contributions to Delta Lake. We use [GitHub Pull Requests ](https://github.com/delta-io/delta/pulls) for accepting changes. You will be prompted to sign a contributor license agreement before your change can be accepted.
+# License
+Apache License 2.0, see [LICENSE](https://github.com/delta-io/delta/blob/master/LICENSE.txt).
 
 # Community
 
-There are two mediums of communication within the Delta Lake community. 
+There are two mediums of communication within the Delta Lake community.
 
 - Public Slack Channel
-  - [Register here](https://join.slack.com/t/delta-users/shared_invite/enQtNTY1NDg0ODcxOTI1LWJkZGU3ZmQ3MjkzNmY2ZDM0NjNlYjE4MWIzYjg2OWM1OTBmMWIxZTllMjg3ZmJkNjIwZmE1ZTZkMmQ0OTk5ZjA)
+  - [Register here](https://join.slack.com/t/delta-users/shared_invite/enQtODQ5ODM5OTAxMjAwLWY4NGI5ZmQ3Y2JmMjZjYjc1MDkwNTA5YTQ4MzhjOWY1MmVjNTM2OGZhNTExNmM5MzQ0YzEzZjIwMjc0OGI0OGM)
   - [Login here](https://delta-users.slack.com/)
 
 - Public [Mailing list](https://groups.google.com/forum/#!forum/delta-users)

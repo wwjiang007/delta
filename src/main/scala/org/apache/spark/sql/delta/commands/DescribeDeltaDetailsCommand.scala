@@ -1,5 +1,5 @@
 /*
- * Copyright 2019 Databricks, Inc.
+ * Copyright (2020) The Delta Lake Project Authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,46 +20,56 @@ package org.apache.spark.sql.delta.commands
 import java.io.FileNotFoundException
 import java.sql.Timestamp
 
-import org.apache.spark.sql.delta.{DeltaLog, Snapshot}
+import org.apache.spark.sql.delta.{DeltaErrors, DeltaLog, DeltaTableIdentifier, Snapshot}
 import org.apache.spark.sql.delta.metering.DeltaLogging
 import org.apache.spark.sql.delta.util.FileNames
 import org.apache.hadoop.fs.Path
 
-import org.apache.spark.sql.{Row, SparkSession}
-import org.apache.spark.sql.catalyst.TableIdentifier
-import org.apache.spark.sql.catalyst.catalog.CatalogTable
-import org.apache.spark.sql.catalyst.encoders.{ExpressionEncoder, RowEncoder}
+import org.apache.spark.sql.{AnalysisException, Row, SparkSession}
+import org.apache.spark.sql.catalyst.{CatalystTypeConverters, ScalaReflection, TableIdentifier}
+import org.apache.spark.sql.catalyst.ScalaReflection.Schema
+import org.apache.spark.sql.catalyst.analysis.NoSuchTableException
+import org.apache.spark.sql.catalyst.catalog.{CatalogTable, CatalogTableType}
 import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.execution.command.RunnableCommand
+import org.apache.spark.sql.types.StructType
 
 /** The result returned by the `describe detail` command. */
 case class TableDetail(
-  format: String,
-  id: String,
-  name: String,
-  description: String,
-  location: String,
-  createdAt: Timestamp,
-  lastModified: Timestamp,
-  partitionColumns: Seq[String],
-  numFiles: java.lang.Long,
-  sizeInBytes: java.lang.Long,
-  properties: Map[String, String],
-  minReaderVersion: java.lang.Integer,
-  minWriterVersion: java.lang.Integer)
+    format: String,
+    id: String,
+    name: String,
+    description: String,
+    location: String,
+    createdAt: Timestamp,
+    lastModified: Timestamp,
+    partitionColumns: Seq[String],
+    numFiles: java.lang.Long,
+    sizeInBytes: java.lang.Long,
+    properties: Map[String, String],
+    minReaderVersion: java.lang.Integer,
+    minWriterVersion: java.lang.Integer)
+
+object TableDetail {
+  val schema = ScalaReflection.schemaFor[TableDetail].dataType.asInstanceOf[StructType]
+
+  private lazy val converter: TableDetail => Row = {
+    val toInternalRow = CatalystTypeConverters.createToCatalystConverter(schema)
+    val toExternalRow = CatalystTypeConverters.createToScalaConverter(schema)
+    toInternalRow.andThen(toExternalRow).asInstanceOf[TableDetail => Row]
+  }
+
+  def toRow(table: TableDetail): Row = converter(table)
+}
 
 /**
  * A command for describing the details of a table such as the format, name, and size.
  */
-abstract class DescribeDeltaDetailCommandBase(
+case class DescribeDeltaDetailCommand(
     path: Option[String],
     tableIdentifier: Option[TableIdentifier]) extends RunnableCommand with DeltaLogging {
 
-  private val encoder = ExpressionEncoder[TableDetail]()
-
-  private val rowEncoder = RowEncoder(encoder.schema).resolveAndBind()
-
-  override val output: Seq[Attribute] = encoder.schema.toAttributes
+  override val output: Seq[Attribute] = TableDetail.schema.toAttributes
 
   override def run(sparkSession: SparkSession): Seq[Row] = {
     val (basePath, tableMetadata) = getPathAndTableMetadata(sparkSession, path, tableIdentifier)
@@ -88,14 +98,45 @@ abstract class DescribeDeltaDetailCommandBase(
    * Resolve `path` and `tableIdentifier` to get the underlying storage path, and its `CatalogTable`
    * if it's a table. The caller will make sure either `path` or `tableIdentifier` is set but not
    * both.
+   *
+   * If `path` is set, return it and an empty `CatalogTable` since it's a physical path. If
+   * `tableIdentifier` is set, we will try to see if it's a Delta data source path (such as
+   * `delta.<a table path>`). If so, we will return the path and an empty `CatalogTable`. Otherwise,
+   * we will use `SessionCatalog` to resolve `tableIdentifier`.
    */
   protected def getPathAndTableMetadata(
       spark: SparkSession,
       path: Option[String],
-      tableIdentifier: Option[TableIdentifier]): (Path, Option[CatalogTable])
+      tableIdentifier: Option[TableIdentifier]): (Path, Option[CatalogTable]) = {
+    path.map(new Path(_) -> None).orElse {
+      tableIdentifier.map { i =>
+        DeltaTableIdentifier(spark, tableIdentifier.get) match {
+          case Some(id) if id.path.isDefined => new Path(id.path.get) -> None
+          case _ =>
+            // This should be a catalog table.
+            try {
+              val metadata = spark.sessionState.catalog.getTableMetadata(i)
+              if (metadata.tableType == CatalogTableType.VIEW) {
+                throw DeltaErrors.viewInDescribeDetailException(i)
+              }
+              new Path(metadata.location) -> Some(metadata)
+            } catch {
+              // Better error message if the user tried to DESCRIBE DETAIL a temp view.
+              case _: NoSuchTableException
+                  if spark.sessionState.catalog.getTempView(i.table).isDefined =>
+                throw DeltaErrors.viewInDescribeDetailException(i)
+            }
+        }
+      }
+    }.getOrElse {
+      throw DeltaErrors.missingTableIdentifierException("DESCRIBE DETAIL")
+    }
+  }
+
+  private def toRows(detail: TableDetail): Seq[Row] = TableDetail.toRow(detail) :: Nil
 
   private def describeNonDeltaTable(table: CatalogTable): Seq[Row] = {
-    Seq(rowEncoder.fromRow(encoder.toRow(
+    toRows(
       TableDetail(
         table.provider.orNull,
         null,
@@ -110,11 +151,11 @@ abstract class DescribeDeltaDetailCommandBase(
         table.properties,
         null,
         null
-      ))))
+      ))
   }
 
   private def describeNonDeltaPath(path: String): Seq[Row] = {
-    Seq(rowEncoder.fromRow(encoder.toRow(
+    toRows(
       TableDetail(
         null,
         null,
@@ -128,7 +169,7 @@ abstract class DescribeDeltaDetailCommandBase(
         null,
         Map.empty,
         null,
-        null))))
+        null))
   }
 
   private def describeDeltaTable(
@@ -139,7 +180,7 @@ abstract class DescribeDeltaDetailCommandBase(
     val currentVersionPath = FileNames.deltaFile(deltaLog.logPath, snapshot.version)
     val fs = currentVersionPath.getFileSystem(sparkSession.sessionState.newHadoopConf)
     val tableName = tableMetadata.map(_.qualifiedName).getOrElse(snapshot.metadata.name)
-    Seq(rowEncoder.fromRow(encoder.toRow(
+    toRows(
       TableDetail(
         "delta",
         snapshot.metadata.id,
@@ -153,6 +194,6 @@ abstract class DescribeDeltaDetailCommandBase(
         snapshot.sizeInBytes,
         snapshot.metadata.configuration,
         snapshot.protocol.minReaderVersion,
-        snapshot.protocol.minWriterVersion))))
+        snapshot.protocol.minWriterVersion))
   }
 }

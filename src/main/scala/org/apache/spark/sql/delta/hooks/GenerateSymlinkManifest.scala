@@ -1,5 +1,5 @@
 /*
- * Copyright 2019 Databricks, Inc.
+ * Copyright (2020) The Delta Lake Project Authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@ import org.apache.spark.SparkEnv
 import org.apache.spark.sql._
 import org.apache.spark.sql.catalyst.analysis.UnresolvedAttribute
 import org.apache.spark.sql.catalyst.catalog.ExternalCatalogUtils
+import org.apache.spark.sql.catalyst.encoders.ExpressionEncoder
 import org.apache.spark.sql.catalyst.expressions.{Attribute, Cast, Concat, Expression, Literal, ScalaUDF}
 import org.apache.spark.sql.execution.datasources.InMemoryFileIndex
 import org.apache.spark.sql.functions.col
@@ -39,6 +40,16 @@ import org.apache.spark.util.SerializableConfiguration
  */
 object GenerateSymlinkManifest extends GenerateSymlinkManifestImpl
 
+// A separate singleton to avoid creating encoders from scratch every time
+object GenerateSymlinkManifestUtils extends DeltaLogging {
+  private[hooks] lazy val mapEncoder = try {
+    ExpressionEncoder[Map[String, String]]()
+  } catch {
+    case e: Throwable =>
+      logError(e.getMessage, e)
+      throw e
+  }
+}
 
 trait GenerateSymlinkManifestImpl extends PostCommitHook with DeltaLogging with Serializable {
   val CONFIG_NAME_ROOT = "compatibility.symlinkFormatManifest"
@@ -95,8 +106,8 @@ trait GenerateSymlinkManifestImpl extends PostCommitHook with DeltaLogging with 
       val partitionValuesOfRemovedFiles =
         txnReadSnapshot.allFiles.join(removedFileNames, "path").select("partitionValues").persist()
       try {
-        val partitionsOfRemovedFiles =
-          partitionValuesOfRemovedFiles.as[Map[String, String]].collect().toSet
+        val partitionsOfRemovedFiles = partitionValuesOfRemovedFiles
+          .as[Map[String, String]](GenerateSymlinkManifestUtils.mapEncoder).collect().toSet
 
         // Get the files present in the updated partitions
         val partitionsUpdated: Set[Map[String, String]] =
@@ -244,9 +255,13 @@ trait GenerateSymlinkManifestImpl extends PostCommitHook with DeltaLogging with 
     }
 
     val newManifestPartitionRelativePaths =
-      withRelativePartitionDir(spark, partitionCols, fileNamesForManifest)
-        .select("relativePartitionDir", "path").as[(String, String)]
-        .groupByKey(_._1).mapGroups {
+      if (fileNamesForManifest.isEmpty && partitionCols.isEmpty) {
+        writeSingleManifestFile(manifestRootDirPath, Iterator())
+        Set.empty[String]
+      } else {
+        withRelativePartitionDir(spark, partitionCols, fileNamesForManifest)
+          .select("relativePartitionDir", "path").as[(String, String)]
+          .groupByKey(_._1).mapGroups {
           (relativePartitionDir: String, relativeDataFilePath: Iterator[(String, String)]) =>
             val manifestPartitionDirAbsPath = {
               if (relativePartitionDir == null || relativePartitionDir.isEmpty) manifestRootDirPath
@@ -255,6 +270,7 @@ trait GenerateSymlinkManifestImpl extends PostCommitHook with DeltaLogging with 
             writeSingleManifestFile(manifestPartitionDirAbsPath, relativeDataFilePath.map(_._2))
             relativePartitionDir
         }.collect().toSet
+      }
 
     logInfo(s"Generated manifest partitions for $deltaLogDataPath " +
       s"[${newManifestPartitionRelativePaths.size}]:\n\t" +
@@ -298,14 +314,14 @@ trait GenerateSymlinkManifestImpl extends PostCommitHook with DeltaLogging with 
 
     require(datasetWithPartitionValues.schema.fieldNames.contains("partitionValues"))
     val colNamePrefix = "_col_"
-    var df: Dataset[_] = datasetWithPartitionValues
 
     // Flatten out nested partition value columns while renaming them, so that the new columns do
     // not conflict with existing columns in DF `pathsWithPartitionValues.
-    val colToRenamedCols = partitionCols.map { column =>
-      val renamedColumn = s"$colNamePrefix$column"
-      df = df.withColumn(renamedColumn, col(s"partitionValues.`$column`"))
-      column -> renamedColumn
+    val colToRenamedCols = partitionCols.map { column => column -> s"$colNamePrefix$column" }
+
+    val df = colToRenamedCols.foldLeft(datasetWithPartitionValues.toDF()) {
+      case(currentDs, (column, renamedColumn)) =>
+        currentDs.withColumn(renamedColumn, col(s"partitionValues.`$column`"))
     }
 
     // Mapping between original column names to use for generating partition path and
@@ -330,13 +346,11 @@ trait GenerateSymlinkManifestImpl extends PostCommitHook with DeltaLogging with 
       partitionColNameToAttrib: Seq[(String, Attribute)],
       timeZoneId: String): Expression = Concat(
 
-
     partitionColNameToAttrib.zipWithIndex.flatMap { case ((colName, col), i) =>
       val partitionName = ScalaUDF(
         ExternalCatalogUtils.getPartitionPathString _,
         StringType,
-        Seq(Literal(colName), Cast(col, StringType, Option(timeZoneId))),
-        Seq(true, true))
+        Seq(Literal(colName), Cast(col, StringType, Option(timeZoneId))))
       if (i == 0) Seq(partitionName) else Seq(Literal(Path.SEPARATOR), partitionName)
     }
   )
